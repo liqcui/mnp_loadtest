@@ -31,7 +31,7 @@ cd /path/to/loadtest
 ### Quick Test (VMs - 10 VMs, 5 policies)
 
 ```bash
-./generate-vms-with-mnp.sh --total-vms 10 --policy-count 5 --apply
+./generate-customer-scale-vms.sh --total-vms 10 --policy-count 5 --apply
 ```
 
 ## Main Scripts
@@ -128,7 +128,7 @@ generated-customer-scale-pods/
 
 ---
 
-### 2. generate-customer-scale.sh
+### 2. generate-customer-scale-vms.sh
 
 **Purpose:** Generate customer-scale VirtualMachines with CIDR-heavy MultiNetworkPolicies
 
@@ -136,19 +136,19 @@ generated-customer-scale-pods/
 
 ```bash
 # Small test (10 VMs, proportional policies)
-./generate-customer-scale.sh \
+./generate-customer-scale-vms.sh \
   --total-vms 10 \
   --policy-count 5 \
   --apply
 
 # Medium test (50 VMs, ~25 policies)
-./generate-customer-scale.sh \
+./generate-customer-scale-vms.sh \
   --total-vms 50 \
   --policy-count 25 \
   --apply
 
 # Large test (100 VMs, full customer pattern)
-./generate-customer-scale.sh \
+./generate-customer-scale-vms.sh \
   --total-vms 100 \
   --full-scale-rules \
   --apply
@@ -163,7 +163,7 @@ generated-customer-scale-pods/
 
 **Output Structure:**
 ```
-generated-customer-scale/
+generated-customer-scale-vms/
 ├── networks/                          # NetworkAttachmentDefinitions
 │   └── nad-vlan{750-758}.yaml
 ├── vms/                               # VirtualMachine manifests
@@ -217,7 +217,7 @@ generated-customer-scale/
 ```
 
 **Key Features:**
-- Similar to `generate-customer-scale.sh` but with simpler configuration
+- Similar to `generate-customer-scale-vms.sh` but with simpler configuration
 - Good for quick VM + MNP validation tests
 - Less resource-intensive than full customer-scale script
 
@@ -323,7 +323,7 @@ watch -n 10 'oc get deployment,pods -n loadtest | head -20'
 oc get csv -n openshift-cnv | grep kubevirt
 
 # 2. Generate VM-based deployment
-./generate-customer-scale.sh \
+./generate-customer-scale-vms.sh \
   --total-vms 10 \
   --policy-count 10 \
   --cidrs-per-policy 450 \
@@ -342,7 +342,7 @@ oc get vmi -n loadtest -w
 ./test-connectivity.sh
 
 # 7. Cleanup
-./generate-customer-scale.sh --clean
+./generate-customer-scale-vms.sh --clean
 ```
 
 ### Example 4: Dry-Run Validation
@@ -611,7 +611,7 @@ oc get network.operator.openshift.io cluster -o yaml
 ./generate-customer-scale-pods.sh --clean
 
 # VM-based test (customer-scale)
-./generate-customer-scale.sh --clean
+./generate-customer-scale-vms.sh --clean
 
 # VM-based test (simplified)
 ./generate-vms-with-mnp.sh --clean
@@ -631,7 +631,7 @@ oc delete net-attach-def -n loadtest
 
 # Remove generated files
 rm -rf generated-customer-scale-pods/
-rm -rf generated-customer-scale/
+rm -rf generated-customer-scale-vms/
 rm -rf generated-vms-mnp/
 ```
 

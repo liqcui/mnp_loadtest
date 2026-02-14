@@ -13,10 +13,13 @@ set -e
 
 # Configuration
 NAMESPACE="${NAMESPACE:-loadtest}"
-TOTAL_PODS="${TOTAL_PODS:-10}"
-POD_TYPE="${POD_TYPE:-deployment}"  # deployment or pod
+DEPLOYMENT_COUNT="${DEPLOYMENT_COUNT:-100}"     # Number of deployments to create
+REPLICAS_PER_DEPLOYMENT="${REPLICAS_PER_DEPLOYMENT:-1}"  # Replicas per deployment
+TOTAL_PODS="${TOTAL_PODS:-}"                    # Auto-calculated if not set
+POD_TYPE="${POD_TYPE:-deployment}"              # deployment or pod
 VLAN_COUNT="${VLAN_COUNT:-9}"
 POLICY_COUNT="${POLICY_COUNT:-485}"
+SLEEP_INTERVAL="${SLEEP_INTERVAL:-10}"          # Sleep seconds between deployments
 OUTPUT_DIR="$(dirname "$0")/generated-customer-scale-pods"
 
 # Policy configuration - matching customer pattern
@@ -47,6 +50,92 @@ log_error() {
     echo -e "${RED}[ERROR]${NC} $1"
 }
 
+# Function to check and enable MultiNetworkPolicy support
+enable_multinetworkpolicy() {
+    log_info "Checking MultiNetworkPolicy support..."
+
+    # Check if useMultiNetworkPolicy is already enabled
+    MNP_ENABLED=$(oc get network.operator.openshift.io cluster -o jsonpath='{.spec.useMultiNetworkPolicy}' 2>/dev/null || echo "false")
+
+    if [[ "$MNP_ENABLED" == "true" ]]; then
+        log_info "✓ MultiNetworkPolicy is already enabled"
+        return 0
+    fi
+
+    log_warn "MultiNetworkPolicy is not enabled. Enabling now..."
+
+    # Enable MultiNetworkPolicy
+    oc patch network.operator.openshift.io cluster --type=merge -p '{"spec":{"useMultiNetworkPolicy":true}}'
+
+    if [[ $? -ne 0 ]]; then
+        log_error "Failed to enable MultiNetworkPolicy"
+        return 1
+    fi
+
+    log_info "✓ MultiNetworkPolicy enabled successfully"
+
+    # Sleep 20 seconds to allow the system to process the configuration change
+    log_info "Waiting 20 seconds for system to process the configuration change..."
+    sleep 20
+
+    log_info "Waiting for ovnkube-node DaemonSet rollout..."
+
+    # Sleep 15 seconds before checking rollout to allow Kubernetes to start the update
+    log_info "Waiting 15 seconds for rollout to start..."
+    sleep 15
+
+    # Wait for DaemonSet rollout to complete (max 10 minutes)
+    log_info "Waiting for ovnkube-node DaemonSet rollout to complete..."
+    if ! oc -n openshift-ovn-kubernetes rollout status daemonset/ovnkube-node --timeout=600s 2>&1; then
+        log_error "Timeout waiting for ovnkube-node DaemonSet rollout"
+        log_warn "Current status:"
+        oc get pods -n openshift-ovn-kubernetes -l app=ovnkube-node
+        return 1
+    fi
+
+    log_info "✓ ovnkube-node DaemonSet rollout completed"
+
+    # Additional verification: Wait for ALL pods to be truly ready
+    log_info "Verifying all ovnkube-node pods are ready..."
+    MAX_RETRIES=30
+    RETRY_COUNT=0
+
+    while [[ $RETRY_COUNT -lt $MAX_RETRIES ]]; do
+        READY_COUNT=$(oc get pods -n openshift-ovn-kubernetes -l app=ovnkube-node -o jsonpath='{range .items[*]}{.status.conditions[?(@.type=="Ready")].status}{"\n"}{end}' 2>/dev/null | grep -c "True" || echo "0")
+        TOTAL_COUNT=$(oc get pods -n openshift-ovn-kubernetes -l app=ovnkube-node --no-headers 2>/dev/null | wc -l)
+
+        # Trim whitespace
+        READY_COUNT=$(echo "$READY_COUNT" | tr -d '[:space:]')
+        TOTAL_COUNT=$(echo "$TOTAL_COUNT" | tr -d '[:space:]')
+
+        if [[ "$READY_COUNT" == "$TOTAL_COUNT" ]] && [[ "$TOTAL_COUNT" -gt 0 ]]; then
+            log_info "✓ All $READY_COUNT/$TOTAL_COUNT ovnkube-node pods are ready"
+
+            # Extra verification: Check for any pods in non-Running state
+            NON_RUNNING=$(oc get pods -n openshift-ovn-kubernetes -l app=ovnkube-node -o jsonpath='{range .items[*]}{.status.phase}{"\n"}{end}' 2>/dev/null | grep -v "Running" | wc -l | tr -d '[:space:]')
+
+            if [[ "$NON_RUNNING" -eq 0 ]]; then
+                log_info "✓ All ovnkube-node pods are in Running state"
+                return 0
+            else
+                log_warn "Found $NON_RUNNING pods not in Running state, waiting..."
+            fi
+        else
+            log_info "Waiting for all pods to be ready... ($READY_COUNT/$TOTAL_COUNT ready)"
+        fi
+
+        RETRY_COUNT=$((RETRY_COUNT + 1))
+        sleep 10
+    done
+
+    # If we get here, not all pods became ready in time
+    log_error "Not all ovnkube-node pods became ready after $((MAX_RETRIES * 10)) seconds"
+    log_error "Ready pods: $READY_COUNT/$TOTAL_COUNT"
+    log_warn "Current pod status:"
+    oc get pods -n openshift-ovn-kubernetes -l app=ovnkube-node
+    return 1
+}
+
 usage() {
     cat <<EOF
 Usage: $0 [OPTIONS]
@@ -57,11 +146,14 @@ Generate customer-scale MultiNetworkPolicy deployment matching real environment:
 - Target: 3,745 ACLs per Pod
 
 OPTIONS:
-    --total-pods N           Total Pods to create (default: 10)
+    --deployment-count N     Number of deployments to create (default: 100)
+    --replicas N            Replicas per deployment (default: 1)
+    --total-pods N          Total Pods (overrides deployment-count × replicas calculation)
     --pod-type TYPE         Pod type: pod or deployment (default: deployment)
     --vlan-count N          Number of VLANs (default: 9, matching customer)
     --policy-count N        Number of policies to generate (default: 485)
     --cidrs-per-policy N    CIDR blocks per policy (default: 450)
+    --sleep-interval N      Sleep seconds between deployments (default: 10)
     --namespace NS          Namespace (default: loadtest)
     --output-dir DIR        Output directory (default: ./generated-customer-scale-pods)
     --dry-run               Generate files without applying
@@ -70,14 +162,20 @@ OPTIONS:
     -h, --help              Show this help
 
 EXAMPLES:
-    # Small test (10 Pods, proportional policies)
-    $0 --total-pods 10 --policy-count 5 --apply
+    # Default: 100 deployments with 1 replica each (100 pods total)
+    $0 --apply
 
-    # Medium test (50 Pods, ~25 policies)
-    $0 --total-pods 50 --policy-count 25 --apply
+    # 50 deployments with 2 replicas each (100 pods total)
+    $0 --deployment-count 50 --replicas 2 --apply
 
-    # Full scale (requires large cluster)
-    $0 --total-pods 1000 --policy-count 485 --apply
+    # 10 deployments with 1 replica, 5 policies
+    $0 --deployment-count 10 --replicas 1 --policy-count 5 --apply
+
+    # Full scale: 100 deployments with 10 replicas (1000 pods)
+    $0 --deployment-count 100 --replicas 10 --policy-count 485 --apply
+
+    # Custom sleep interval (5 seconds)
+    $0 --deployment-count 20 --sleep-interval 5 --apply
 
     # Clean up
     $0 --clean
@@ -85,9 +183,9 @@ EXAMPLES:
 EXPECTED ACL COUNT:
     Formula: Pods × CIDRS_PER_POLICY × PORTS_PER_POLICY × (POLICY_COUNT / Pods)
 
-    Small (10 Pods, 5 policies):     ~4,500 ACLs
-    Medium (50 Pods, 25 policies):   ~22,500 ACLs
-    Full (1000 Pods, 485 policies):  ~3,745,000 ACLs
+    Default (100 Pods, 485 policies):     ~374,500 ACLs
+    Medium (500 Pods, 485 policies):      ~1,872,500 ACLs
+    Full (1000 Pods, 485 policies):       ~3,745,000 ACLs
 
 EOF
 }
@@ -99,6 +197,14 @@ CLEAN=false
 
 while [[ $# -gt 0 ]]; do
     case $1 in
+        --deployment-count)
+            DEPLOYMENT_COUNT="$2"
+            shift 2
+            ;;
+        --replicas)
+            REPLICAS_PER_DEPLOYMENT="$2"
+            shift 2
+            ;;
         --total-pods)
             TOTAL_PODS="$2"
             shift 2
@@ -113,6 +219,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --cidrs-per-policy)
             CIDRS_PER_POLICY="$2"
+            shift 2
+            ;;
+        --sleep-interval)
+            SLEEP_INTERVAL="$2"
             shift 2
             ;;
         --namespace)
@@ -193,6 +303,18 @@ fi
 # Create output directory
 mkdir -p "$OUTPUT_DIR"/{networks,pods,policies}
 
+# Calculate TOTAL_PODS if not explicitly set
+if [[ -z "$TOTAL_PODS" ]]; then
+    TOTAL_PODS=$((DEPLOYMENT_COUNT * REPLICAS_PER_DEPLOYMENT))
+else
+    # If TOTAL_PODS is set, recalculate DEPLOYMENT_COUNT and REPLICAS_PER_DEPLOYMENT
+    # Keep REPLICAS_PER_DEPLOYMENT, adjust DEPLOYMENT_COUNT
+    DEPLOYMENT_COUNT=$((TOTAL_PODS / REPLICAS_PER_DEPLOYMENT))
+    if [[ $DEPLOYMENT_COUNT -eq 0 ]]; then
+        DEPLOYMENT_COUNT=1
+    fi
+fi
+
 # Calculate distribution
 PODS_PER_VLAN=$((TOTAL_PODS / VLAN_COUNT))
 if [[ $PODS_PER_VLAN -eq 0 && $TOTAL_PODS -gt 0 ]]; then
@@ -200,19 +322,27 @@ if [[ $PODS_PER_VLAN -eq 0 && $TOTAL_PODS -gt 0 ]]; then
 fi
 
 # Calculate expected ACLs
-EXPECTED_ACLS_PER_POD=$((CIDRS_PER_POLICY * PORTS_PER_POLICY * POLICY_COUNT / TOTAL_PODS))
-TOTAL_EXPECTED_ACLS=$((EXPECTED_ACLS_PER_POD * TOTAL_PODS))
+if [[ $TOTAL_PODS -gt 0 ]]; then
+    EXPECTED_ACLS_PER_POD=$((CIDRS_PER_POLICY * PORTS_PER_POLICY * POLICY_COUNT / TOTAL_PODS))
+    TOTAL_EXPECTED_ACLS=$((EXPECTED_ACLS_PER_POD * TOTAL_PODS))
+else
+    EXPECTED_ACLS_PER_POD=0
+    TOTAL_EXPECTED_ACLS=0
+fi
 
 log_info "=========================================="
 log_info "Customer-Scale MNP Generator"
 log_info "=========================================="
-log_info "Total Pods: $TOTAL_PODS"
+log_info "Deployments: $DEPLOYMENT_COUNT"
+log_info "Replicas per deployment: $REPLICAS_PER_DEPLOYMENT"
+log_info "Total Pods: $TOTAL_PODS ($DEPLOYMENT_COUNT × $REPLICAS_PER_DEPLOYMENT)"
 log_info "Pod Type: $POD_TYPE"
 log_info "VLANs: $VLAN_COUNT (vlan$VLAN_START-vlan$((VLAN_START + VLAN_COUNT - 1)))"
 log_info "Pods per VLAN: ~$PODS_PER_VLAN"
 log_info "Policies: $POLICY_COUNT"
 log_info "CIDRs per policy: $CIDRS_PER_POLICY"
 log_info "Ports per policy: $PORTS_PER_POLICY"
+log_info "Sleep interval: ${SLEEP_INTERVAL}s"
 log_info "Namespace: $NAMESPACE"
 log_info "Output: $OUTPUT_DIR"
 log_info "=========================================="
@@ -252,10 +382,6 @@ EOF
 done
 
 # Generate Pods or Deployments
-# Calculate number of deployments (100 deployments × 10 replicas = 1000 pods)
-REPLICAS_PER_DEPLOYMENT=10
-DEPLOYMENT_COUNT=$((TOTAL_PODS / REPLICAS_PER_DEPLOYMENT))
-
 log_info "Generating $DEPLOYMENT_COUNT ${POD_TYPE}s (with $REPLICAS_PER_DEPLOYMENT replicas each = $TOTAL_PODS total pods)..."
 for ((i=0; i<$DEPLOYMENT_COUNT; i++)); do
     VLAN_INDEX=$((i % VLAN_COUNT))
@@ -575,6 +701,14 @@ echo ""
 if [[ "$APPLY" == "true" ]]; then
     log_info "Applying to cluster..."
 
+    # Check and enable MultiNetworkPolicy support
+    enable_multinetworkpolicy
+    if [[ $? -ne 0 ]]; then
+        log_error "Failed to enable MultiNetworkPolicy support"
+        exit 1
+    fi
+    echo ""
+
     # Create namespace
     oc create namespace "$NAMESPACE" 2>/dev/null || log_warn "Namespace $NAMESPACE already exists"
 
@@ -583,26 +717,26 @@ if [[ "$APPLY" == "true" ]]; then
     oc apply -f "$OUTPUT_DIR/networks/"
 
     # Apply policies one by one with sleep
-    log_info "Applying MultiNetworkPolicies one by one (10 second delay between each)..."
+    log_info "Applying MultiNetworkPolicies one by one (${SLEEP_INTERVAL}s delay between each)..."
     TOTAL_POLICIES=$(ls -1 "$OUTPUT_DIR/policies"/*.yaml 2>/dev/null | wc -l)
     CURRENT_POLICY=0
     for policy_file in "$OUTPUT_DIR/policies"/*.yaml; do
         CURRENT_POLICY=$((CURRENT_POLICY + 1))
         log_info "  Applying policy $CURRENT_POLICY/$TOTAL_POLICIES: $(basename "$policy_file")"
         oc apply -f "$policy_file"
-        sleep 10
+        sleep "$SLEEP_INTERVAL"
     done
     log_info "✓ Applied all $TOTAL_POLICIES MultiNetworkPolicies"
 
     # Apply Pods/Deployments one by one with sleep
-    log_info "Applying ${POD_TYPE}s one by one (10 second delay between each)..."
+    log_info "Applying ${POD_TYPE}s one by one (${SLEEP_INTERVAL}s delay between each)..."
     TOTAL_DEPLOYMENTS=$(ls -1 "$OUTPUT_DIR/pods"/*.yaml 2>/dev/null | wc -l)
     CURRENT_DEPLOYMENT=0
     for deployment_file in "$OUTPUT_DIR/pods"/*.yaml; do
         CURRENT_DEPLOYMENT=$((CURRENT_DEPLOYMENT + 1))
         log_info "  Applying ${POD_TYPE} $CURRENT_DEPLOYMENT/$TOTAL_DEPLOYMENTS: $(basename "$deployment_file")"
         oc apply -f "$deployment_file"
-        sleep 10
+        sleep "$SLEEP_INTERVAL"
     done
     log_info "✓ Applied all $TOTAL_DEPLOYMENTS ${POD_TYPE}s"
 

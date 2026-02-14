@@ -43,33 +43,46 @@ cd /path/to/loadtest
 **Use Case:** Testing Pod-based workloads with realistic customer patterns
 
 ```bash
-# Small test (10 Pods × 10 replicas, 5 policies)
+# Default: 100 deployments with 1 replica each (100 pods)
+./generate-customer-scale-pods.sh --apply
+
+# Small test (10 deployments, 1 replica each, 5 policies)
 ./generate-customer-scale-pods.sh \
-  --total-pods 100 \
+  --deployment-count 10 \
+  --replicas 1 \
   --policy-count 5 \
-  --cidrs-per-policy 450 \
   --apply
 
-# Medium test (50 Pods × 10 replicas, 25 policies)
+# Medium test (50 deployments, 2 replicas each = 100 pods, 25 policies)
 ./generate-customer-scale-pods.sh \
-  --total-pods 500 \
+  --deployment-count 50 \
+  --replicas 2 \
   --policy-count 25 \
   --apply
 
-# Full scale (1000 Pods via 100 deployments × 10 replicas, 385 policies)
+# Large scale (500 deployments, 2 replicas each = 1000 pods, 385 policies)
 # WARNING: Requires large cluster (5+ worker nodes, 32GB+ RAM per node)
 ./generate-customer-scale-pods.sh \
-  --total-pods 1000 \
+  --deployment-count 500 \
+  --replicas 2 \
   --policy-count 385 \
   --cidrs-per-policy 450 \
+  --apply
+
+# Very large scale with slower rollout (2000 deployments, 20s sleep)
+./generate-customer-scale-pods.sh \
+  --deployment-count 2000 \
+  --replicas 1 \
+  --policy-count 385 \
+  --sleep-interval 20 \
   --apply
 ```
 
 **Key Features:**
-- Creates **100 Deployments** with **10 replicas each** = 1000 total pods
-- Generates **385 CIDR-heavy policies** (450 CIDRs × 2 ports each)
-- Expected ACL count: **~346,000 ACLs** for full scale
-- Applies policies with **10-second delays** between each for controlled rollout
+- Creates deployments with configurable replica count (default: 100 deployments × 1 replica = 100 pods)
+- Generates **CIDR-heavy policies** (450 CIDRs × 2 ports each by default)
+- Configurable **sleep interval** between resource creation (default: 10s, recommended: 20-30s for large scale)
+- Expected ACL count: **~173 ACLs per pod** (with 385 policies, 450 CIDRs)
 - Uses realistic policy names matching customer patterns
 - Supports dry-run mode for validation
 
@@ -79,9 +92,9 @@ generated-customer-scale-pods/
 ├── networks/                          # NetworkAttachmentDefinitions
 │   └── nad-vlan{750-758}.yaml         # 9 VLAN definitions
 ├── pods/                              # Deployment manifests
-│   └── loadtest-pod-{0-99}.yaml       # 100 deployments (10 replicas each)
+│   └── loadtest-pod-{0-N}.yaml        # N deployment files (configurable replicas)
 ├── policies/                          # MultiNetworkPolicy manifests
-│   └── {policy-name}.yaml             # 385 policy files
+│   └── {policy-name}.yaml             # Policy files (configurable count)
 ├── all-in-one.yaml                    # Combined manifest
 └── SUMMARY.md                         # Deployment summary
 ```
@@ -90,9 +103,12 @@ generated-customer-scale-pods/
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--total-pods` | 10 | Total pods (will create deployments = pods/10) |
+| `--deployment-count` | 100 | Number of deployments to create |
+| `--replicas` | 1 | Replicas per deployment |
+| `--total-pods` | (auto-calc) | Total pods (overrides deployment-count × replicas) |
 | `--policy-count` | 485 | Number of MultiNetworkPolicies |
 | `--cidrs-per-policy` | 450 | CIDR blocks per policy |
+| `--sleep-interval` | 10 | Sleep seconds between deployments (use 20-30 for large scale) |
 | `--vlan-count` | 9 | Number of VLANs (vlan750-vlan758) |
 | `--namespace` | loadtest | Target namespace |
 | `--dry-run` | false | Generate files without applying |
@@ -101,11 +117,14 @@ generated-customer-scale-pods/
 
 **Expected Results:**
 
-| Scale | Deployments | Total Pods | Policies | Expected ACLs | Time to Deploy |
-|-------|-------------|------------|----------|---------------|----------------|
-| Small | 10 | 100 | 5 | ~4,500 | ~2 min |
-| Medium | 50 | 500 | 25 | ~22,500 | ~8 min |
-| Full | 100 | 1,000 | 385 | ~346,000 | ~17 min |
+| Scale | Deployments | Replicas | Total Pods | Policies | Expected ACLs | Time to Deploy |
+|-------|-------------|----------|------------|----------|---------------|----------------|
+| Small | 10 | 1 | 10 | 5 | ~450 | ~2 min |
+| Medium | 100 | 1 | 100 | 25 | ~11,250 | ~17 min |
+| Large | 500 | 2 | 1,000 | 385 | ~173,000 | ~2.8 hrs (10s) |
+| X-Large | 2000 | 1 | 2,000 | 385 | ~346,000 | ~11 hrs (20s) |
+
+**Note:** Time estimates include policy application time. Use `--sleep-interval 20` or higher for large deployments to avoid OVN/OVS overload.
 
 ---
 
@@ -467,9 +486,45 @@ All scripts create **9 VLANs** (vlan750-vlan758) using layer2 topology:
 
 ## Troubleshooting
 
-### Issue: Pods stuck in ContainerCreating
+### Issue: Pods stuck in ContainerCreating - "timed out waiting for OVS port binding"
 
-**Cause:** Secondary network not ready
+**Cause:** OVN/OVS controllers overwhelmed when creating too many pods simultaneously
+
+**Symptoms:**
+```bash
+# Check pod events
+oc describe pod <pod-name> -n loadtest
+# Shows: "failed to configure pod interface: timed out waiting for OVS port binding"
+
+# Check ovnkube-controller logs
+oc logs -n openshift-ovn-kubernetes -l app=ovnkube-node -c ovnkube-controller --tail=50
+# Shows: "timed out waiting for OVS port binding (ovn-installed)"
+```
+
+**Solution:**
+```bash
+# Option 1: Increase sleep interval (RECOMMENDED for large scale)
+# Use --sleep-interval 20 or 30 for deployments > 500
+./generate-customer-scale-pods.sh \
+  --deployment-count 2000 \
+  --sleep-interval 20 \
+  --apply
+
+# Option 2: Delete failed pods and let them retry
+oc delete pods -n loadtest --field-selector=status.phase!=Running
+# Kubernetes will recreate them, spreading out the load
+
+# Option 3: Reduce deployment scale
+./generate-customer-scale-pods.sh --clean
+./generate-customer-scale-pods.sh \
+  --deployment-count 500 \
+  --sleep-interval 20 \
+  --apply
+```
+
+### Issue: Pods stuck in ContainerCreating - Secondary network not ready
+
+**Cause:** Secondary network attachment not properly configured
 
 **Solution:**
 ```bash

@@ -50,6 +50,53 @@ log_error() {
     echo -e "${RED}[ERROR]${NC} $1"
 }
 
+# Function to check and enable MultiNetworkPolicy support
+enable_multinetworkpolicy() {
+    log_info "Checking MultiNetworkPolicy support..."
+
+    # Check if useMultiNetworkPolicy is already enabled
+    MNP_ENABLED=$(oc get network.operator.openshift.io cluster -o jsonpath='{.spec.useMultiNetworkPolicy}' 2>/dev/null || echo "false")
+
+    if [[ "$MNP_ENABLED" == "true" ]]; then
+        log_info "✓ MultiNetworkPolicy is already enabled"
+        return 0
+    fi
+
+    log_warn "MultiNetworkPolicy is not enabled. Enabling now..."
+
+    # Enable MultiNetworkPolicy
+    oc patch network.operator.openshift.io cluster --type=merge -p '{"spec":{"useMultiNetworkPolicy":true}}'
+
+    if [[ $? -ne 0 ]]; then
+        log_error "Failed to enable MultiNetworkPolicy"
+        return 1
+    fi
+
+    log_info "✓ MultiNetworkPolicy enabled successfully"
+    log_info "Waiting for ovnkube-node DaemonSet rollout..."
+
+    # Sleep 15 seconds before checking rollout to allow Kubernetes to start the update
+    log_info "Waiting 15 seconds for rollout to start..."
+    sleep 15
+
+    # Wait for DaemonSet rollout to complete (max 10 minutes)
+    log_info "Waiting for ovnkube-node DaemonSet rollout to complete..."
+    if oc -n openshift-ovn-kubernetes rollout status daemonset/ovnkube-node --timeout=600s 2>&1; then
+        log_info "✓ ovnkube-node DaemonSet rollout completed successfully"
+
+        # Verify all pods are ready
+        READY_COUNT=$(oc get pods -n openshift-ovn-kubernetes -l app=ovnkube-node -o jsonpath='{range .items[*]}{.status.conditions[?(@.type=="Ready")].status}{"\n"}{end}' 2>/dev/null | grep -c "True")
+        TOTAL_COUNT=$(oc get pods -n openshift-ovn-kubernetes -l app=ovnkube-node --no-headers 2>/dev/null | wc -l)
+        log_info "✓ All $READY_COUNT/$TOTAL_COUNT ovnkube-node pods are ready"
+        return 0
+    else
+        log_error "Timeout waiting for ovnkube-node DaemonSet rollout"
+        log_warn "Current status:"
+        oc get pods -n openshift-ovn-kubernetes -l app=ovnkube-node
+        return 1
+    fi
+}
+
 usage() {
     cat <<EOF
 Usage: $0 [OPTIONS]
@@ -535,6 +582,14 @@ echo ""
 
 if [[ "$APPLY" == "true" ]]; then
     log_info "Applying to cluster..."
+
+    # Check and enable MultiNetworkPolicy support
+    enable_multinetworkpolicy
+    if [[ $? -ne 0 ]]; then
+        log_error "Failed to enable MultiNetworkPolicy support"
+        exit 1
+    fi
+    echo ""
 
     # Create namespace
     oc create namespace "$NAMESPACE" 2>/dev/null || log_warn "Namespace $NAMESPACE already exists"

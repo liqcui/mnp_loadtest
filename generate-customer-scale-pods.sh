@@ -156,6 +156,7 @@ OPTIONS:
     --sleep-interval N      Sleep seconds between deployments (default: 10)
     --namespace NS          Namespace (default: loadtest)
     --output-dir DIR        Output directory (default: ./generated-customer-scale-pods)
+    --deployments-only      Create only deployments/pods (skip NADs and policies)
     --dry-run               Generate files without applying
     --apply                 Apply to cluster
     --clean                 Clean up resources
@@ -164,6 +165,9 @@ OPTIONS:
 EXAMPLES:
     # Default: 100 deployments with 1 replica each (100 pods total)
     $0 --apply
+
+    # Create only deployments/pods (no NADs or policies)
+    $0 --deployment-count 50 --deployments-only --apply
 
     # 50 deployments with 2 replicas each (100 pods total)
     $0 --deployment-count 50 --replicas 2 --apply
@@ -194,6 +198,7 @@ EOF
 DRY_RUN=true
 APPLY=false
 CLEAN=false
+DEPLOYMENTS_ONLY=false
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -207,6 +212,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --total-pods)
             TOTAL_PODS="$2"
+            shift 2
+            ;;
+        --pod-type)
+            POD_TYPE="$2"
             shift 2
             ;;
         --vlan-count)
@@ -232,6 +241,10 @@ while [[ $# -gt 0 ]]; do
         --output-dir)
             OUTPUT_DIR="$2"
             shift 2
+            ;;
+        --deployments-only)
+            DEPLOYMENTS_ONLY=true
+            shift
             ;;
         --dry-run)
             DRY_RUN=true
@@ -337,29 +350,36 @@ log_info "Deployments: $DEPLOYMENT_COUNT"
 log_info "Replicas per deployment: $REPLICAS_PER_DEPLOYMENT"
 log_info "Total Pods: $TOTAL_PODS ($DEPLOYMENT_COUNT × $REPLICAS_PER_DEPLOYMENT)"
 log_info "Pod Type: $POD_TYPE"
-log_info "VLANs: $VLAN_COUNT (vlan$VLAN_START-vlan$((VLAN_START + VLAN_COUNT - 1)))"
-log_info "Pods per VLAN: ~$PODS_PER_VLAN"
-log_info "Policies: $POLICY_COUNT"
-log_info "CIDRs per policy: $CIDRS_PER_POLICY"
-log_info "Ports per policy: $PORTS_PER_POLICY"
+if [[ "$DEPLOYMENTS_ONLY" == "true" ]]; then
+    log_info "Mode: Deployments/Pods only (skipping NADs and policies)"
+else
+    log_info "VLANs: $VLAN_COUNT (vlan$VLAN_START-vlan$((VLAN_START + VLAN_COUNT - 1)))"
+    log_info "Pods per VLAN: ~$PODS_PER_VLAN"
+    log_info "Policies: $POLICY_COUNT"
+    log_info "CIDRs per policy: $CIDRS_PER_POLICY"
+    log_info "Ports per policy: $PORTS_PER_POLICY"
+fi
 log_info "Sleep interval: ${SLEEP_INTERVAL}s"
 log_info "Namespace: $NAMESPACE"
 log_info "Output: $OUTPUT_DIR"
 log_info "=========================================="
-log_info "Expected ACLs per Pod: ~$EXPECTED_ACLS_PER_POD"
-log_info "Total expected ACLs: ~$TOTAL_EXPECTED_ACLS"
-log_info "=========================================="
+if [[ "$DEPLOYMENTS_ONLY" == "false" ]]; then
+    log_info "Expected ACLs per Pod: ~$EXPECTED_ACLS_PER_POD"
+    log_info "Total expected ACLs: ~$TOTAL_EXPECTED_ACLS"
+    log_info "=========================================="
+fi
 echo ""
 
 # Generate NetworkAttachmentDefinitions for each VLAN
-log_info "Generating NetworkAttachmentDefinitions for $VLAN_COUNT VLANs..."
-for ((v=0; v<$VLAN_COUNT; v++)); do
-    VLAN_ID=$((VLAN_START + v))
-    VLAN_NAME="vlan${VLAN_ID}"
-    SUBNET_THIRD=$((111 + v))
-    SUBNET="${VLAN_BASE_IP}.${SUBNET_THIRD}.0/24"
+if [[ "$DEPLOYMENTS_ONLY" == "false" ]]; then
+    log_info "Generating NetworkAttachmentDefinitions for $VLAN_COUNT VLANs..."
+    for ((v=0; v<$VLAN_COUNT; v++)); do
+        VLAN_ID=$((VLAN_START + v))
+        VLAN_NAME="vlan${VLAN_ID}"
+        SUBNET_THIRD=$((111 + v))
+        SUBNET="${VLAN_BASE_IP}.${SUBNET_THIRD}.0/24"
 
-    cat > "$OUTPUT_DIR/networks/nad-${VLAN_NAME}.yaml" <<EOF
+        cat > "$OUTPUT_DIR/networks/nad-${VLAN_NAME}.yaml" <<EOF
 ---
 apiVersion: k8s.cni.cncf.io/v1
 kind: NetworkAttachmentDefinition
@@ -378,8 +398,11 @@ spec:
     }
 EOF
 
-    log_info "  Generated NAD: ${VLAN_NAME} (${SUBNET}, layer2)"
-done
+        log_info "  Generated NAD: ${VLAN_NAME} (${SUBNET}, layer2)"
+    done
+else
+    log_info "Skipping NetworkAttachmentDefinitions generation (--deployments-only mode)"
+fi
 
 # Generate Pods or Deployments
 log_info "Generating $DEPLOYMENT_COUNT ${POD_TYPE}s (with $REPLICAS_PER_DEPLOYMENT replicas each = $TOTAL_PODS total pods)..."
@@ -490,10 +513,11 @@ echo ""
 log_info "✓ Generated $DEPLOYMENT_COUNT ${POD_TYPE} manifests ($TOTAL_PODS total pods)"
 
 # Generate MultiNetworkPolicies (customer pattern: CIDR-heavy)
-log_info "Generating $POLICY_COUNT MultiNetworkPolicies (CIDR-heavy pattern)..."
+if [[ "$DEPLOYMENTS_ONLY" == "false" ]]; then
+    log_info "Generating $POLICY_COUNT MultiNetworkPolicies (CIDR-heavy pattern)..."
 
-# Build VLAN list for policy-for annotation (all VLANs)
-VLAN_LIST=""
+    # Build VLAN list for policy-for annotation (all VLANs)
+    VLAN_LIST=""
 for ((v=0; v<$VLAN_COUNT; v++)); do
     VLAN_ID=$((VLAN_START + v))
     VLAN_NAME="vlan${VLAN_ID}"
@@ -578,9 +602,12 @@ EOF
     if [[ $((p % 50)) -eq 0 ]]; then
         echo -ne "\r  Progress: $p/$POLICY_COUNT policies"
     fi
-done
-echo ""
-log_info "✓ Generated $POLICY_COUNT MultiNetworkPolicy manifests"
+    done
+    echo ""
+    log_info "✓ Generated $POLICY_COUNT MultiNetworkPolicy manifests"
+else
+    log_info "Skipping MultiNetworkPolicies generation (--deployments-only mode)"
+fi
 
 # Create combined manifest
 log_info "Creating combined manifest..."
@@ -598,10 +625,14 @@ cat > "$OUTPUT_DIR/all-in-one.yaml" <<EOF
 EOF
 
 # Add NADs
-cat "$OUTPUT_DIR"/networks/*.yaml >> "$OUTPUT_DIR/all-in-one.yaml"
+if [[ "$DEPLOYMENTS_ONLY" == "false" ]]; then
+    cat "$OUTPUT_DIR"/networks/*.yaml >> "$OUTPUT_DIR/all-in-one.yaml" 2>/dev/null || true
+fi
 
 # Add policies
-cat "$OUTPUT_DIR"/policies/*.yaml >> "$OUTPUT_DIR/all-in-one.yaml"
+if [[ "$DEPLOYMENTS_ONLY" == "false" ]]; then
+    cat "$OUTPUT_DIR"/policies/*.yaml >> "$OUTPUT_DIR/all-in-one.yaml" 2>/dev/null || true
+fi
 
 # Add Pods
 cat "$OUTPUT_DIR"/pods/*.yaml >> "$OUTPUT_DIR/all-in-one.yaml"
@@ -689,62 +720,60 @@ log_info "Generation Complete"
 log_info "=========================================="
 log_info "Output directory: $OUTPUT_DIR"
 log_info "Files generated:"
-log_info "  - VLANs: $VLAN_COUNT NADs (layer2 topology)"
+if [[ "$DEPLOYMENTS_ONLY" == "false" ]]; then
+    log_info "  - VLANs: $VLAN_COUNT NADs (layer2 topology)"
+fi
 log_info "  - Deployments: $DEPLOYMENT_COUNT manifests ($POD_TYPE, $REPLICAS_PER_DEPLOYMENT replicas each)"
 log_info "  - Total Pods: $TOTAL_PODS ($DEPLOYMENT_COUNT × $REPLICAS_PER_DEPLOYMENT)"
-log_info "  - Policies: $POLICY_COUNT (CIDR-heavy pattern)"
+if [[ "$DEPLOYMENTS_ONLY" == "false" ]]; then
+    log_info "  - Policies: $POLICY_COUNT (CIDR-heavy pattern)"
+fi
 log_info "  - Combined: all-in-one.yaml"
 echo ""
-log_info "Expected ACL increase: ~$TOTAL_EXPECTED_ACLS ACLs"
-echo ""
+if [[ "$DEPLOYMENTS_ONLY" == "false" ]]; then
+    log_info "Expected ACL increase: ~$TOTAL_EXPECTED_ACLS ACLs"
+    echo ""
+fi
 
 if [[ "$APPLY" == "true" ]]; then
     log_info "Applying to cluster..."
 
-    # Check and enable MultiNetworkPolicy support
-    enable_multinetworkpolicy
-    if [[ $? -ne 0 ]]; then
-        log_error "Failed to enable MultiNetworkPolicy support"
-        exit 1
+    # Check and enable MultiNetworkPolicy support (only if not in deployments-only mode)
+    if [[ "$DEPLOYMENTS_ONLY" == "false" ]]; then
+        enable_multinetworkpolicy
+        if [[ $? -ne 0 ]]; then
+            log_error "Failed to enable MultiNetworkPolicy support"
+            exit 1
+        fi
+        echo ""
     fi
-    echo ""
 
     # Create namespace
     oc create namespace "$NAMESPACE" 2>/dev/null || log_warn "Namespace $NAMESPACE already exists"
 
     # Apply NADs
-    log_info "Applying NetworkAttachmentDefinitions..."
-    oc apply -f "$OUTPUT_DIR/networks/"
+    if [[ "$DEPLOYMENTS_ONLY" == "false" ]]; then
+        log_info "Applying NetworkAttachmentDefinitions..."
+        oc apply -f "$OUTPUT_DIR/networks/"
+    fi
 
-    # Apply policies one by one with sleep
-    log_info "Applying MultiNetworkPolicies one by one (${SLEEP_INTERVAL}s delay between each)..."
-    TOTAL_POLICIES=$(ls -1 "$OUTPUT_DIR/policies"/*.yaml 2>/dev/null | wc -l)
-    CURRENT_POLICY=0
-    for policy_file in "$OUTPUT_DIR/policies"/*.yaml; do
-        CURRENT_POLICY=$((CURRENT_POLICY + 1))
-        log_info "  Applying policy $CURRENT_POLICY/$TOTAL_POLICIES: $(basename "$policy_file")"
-        oc apply -f "$policy_file"
-        sleep "$SLEEP_INTERVAL"
-    done
-    log_info "✓ Applied all $TOTAL_POLICIES MultiNetworkPolicies"
+    # Apply policies
+    if [[ "$DEPLOYMENTS_ONLY" == "false" ]]; then
+        log_info "Applying MultiNetworkPolicies..."
+        oc apply -f "$OUTPUT_DIR/policies/"
+    fi
 
-    # Apply Pods/Deployments one by one with sleep
-    log_info "Applying ${POD_TYPE}s one by one (${SLEEP_INTERVAL}s delay between each)..."
-    TOTAL_DEPLOYMENTS=$(ls -1 "$OUTPUT_DIR/pods"/*.yaml 2>/dev/null | wc -l)
-    CURRENT_DEPLOYMENT=0
-    for deployment_file in "$OUTPUT_DIR/pods"/*.yaml; do
-        CURRENT_DEPLOYMENT=$((CURRENT_DEPLOYMENT + 1))
-        log_info "  Applying ${POD_TYPE} $CURRENT_DEPLOYMENT/$TOTAL_DEPLOYMENTS: $(basename "$deployment_file")"
-        oc apply -f "$deployment_file"
-        sleep "$SLEEP_INTERVAL"
-    done
-    log_info "✓ Applied all $TOTAL_DEPLOYMENTS ${POD_TYPE}s"
+    # Apply Pods/Deployments
+    log_info "Applying ${POD_TYPE}s..."
+    oc apply -f "$OUTPUT_DIR/pods/"
 
     log_info "✓ Resources applied to cluster"
     log_info ""
     log_info "Monitor with:"
     log_info "  oc get deployment,pods -n $NAMESPACE -w"
-    log_info "  ./demo-acl-check.sh"
+    if [[ "$DEPLOYMENTS_ONLY" == "false" ]]; then
+        log_info "  ./demo-acl-check.sh"
+    fi
 else
     log_info "Dry run complete. Files generated but not applied."
     log_info ""

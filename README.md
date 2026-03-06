@@ -28,6 +28,33 @@ cd /path/to/loadtest
 ./generate-customer-scale-pods.sh --total-pods 10 --policy-count 5 --apply
 ```
 
+### Full Scale Test (1000 pods, 385 policies, 450 CIDRs per policy)
+
+**Gradual Mode (RECOMMENDED):**
+```bash
+# Apply in steps: safer, prevents cluster overload
+./generate-customer-scale-pods.sh \
+  --deployment-count 100 \
+  --replicas 10 \
+  --policy-count 385 \
+  --cidrs-per-policy 450 \
+  --gradual \
+  --step-size 10 \
+  --step-interval 30 \
+  --apply
+```
+
+**Batch Mode (All at once):**
+```bash
+# Apply all resources at once: faster but may overwhelm cluster
+./generate-customer-scale-pods.sh \
+  --deployment-count 100 \
+  --replicas 10 \
+  --policy-count 385 \
+  --cidrs-per-policy 450 \
+  --apply
+```
+
 ### Quick Test (VMs - 10 VMs, 5 policies)
 
 ```bash
@@ -41,6 +68,27 @@ cd /path/to/loadtest
 **Purpose:** Generate customer-scale deployment with Pods/Deployments and CIDR-heavy MultiNetworkPolicies
 
 **Use Case:** Testing Pod-based workloads with realistic customer patterns
+
+#### Quick Reference: 1000 Pods + 385 Policies + 450 CIDRs
+
+**Gradual Mode (RECOMMENDED):**
+```bash
+./generate-customer-scale-pods.sh \
+  --deployment-count 100 --replicas 10 \
+  --policy-count 385 --cidrs-per-policy 450 \
+  --gradual --step-size 10 --step-interval 30 \
+  --apply
+```
+
+**Batch Mode (All at once):**
+```bash
+./generate-customer-scale-pods.sh \
+  --deployment-count 100 --replicas 10 \
+  --policy-count 385 --cidrs-per-policy 450 \
+  --apply
+```
+
+#### More Examples
 
 ```bash
 # Default: 100 deployments with 1 replica each (100 pods)
@@ -60,7 +108,28 @@ cd /path/to/loadtest
   --policy-count 25 \
   --apply
 
-# Large scale (500 deployments, 2 replicas each = 1000 pods, 385 policies)
+# Large scale GRADUAL deployment (100 deployments, 10 replicas = 1000 pods)
+# RECOMMENDED: Use gradual mode for large deployments to prevent cluster overload
+./generate-customer-scale-pods.sh \
+  --deployment-count 100 \
+  --replicas 10 \
+  --policy-count 385 \
+  --cidrs-per-policy 450 \
+  --gradual \
+  --step-size 10 \
+  --step-interval 30 \
+  --apply
+
+# Add more pods to existing environment (no NADs/policies)
+./generate-customer-scale-pods.sh \
+  --deployment-count 50 \
+  --replicas 10 \
+  --deployments-only \
+  --gradual \
+  --step-size 5 \
+  --apply
+
+# Large scale batch deployment (all at once - may overwhelm cluster)
 # WARNING: Requires large cluster (5+ worker nodes, 32GB+ RAM per node)
 ./generate-customer-scale-pods.sh \
   --deployment-count 500 \
@@ -68,19 +137,13 @@ cd /path/to/loadtest
   --policy-count 385 \
   --cidrs-per-policy 450 \
   --apply
-
-# Very large scale with slower rollout (2000 deployments, 20s sleep)
-./generate-customer-scale-pods.sh \
-  --deployment-count 2000 \
-  --replicas 1 \
-  --policy-count 385 \
-  --sleep-interval 20 \
-  --apply
 ```
 
 **Key Features:**
 - Creates deployments with configurable replica count (default: 100 deployments × 1 replica = 100 pods)
 - Generates **CIDR-heavy policies** (450 CIDRs × 2 ports each by default)
+- **Gradual deployment mode** - Apply pods in steps to prevent cluster overload (NEW!)
+- **Deployments-only mode** - Add pods without creating NADs/policies (NEW!)
 - Configurable **sleep interval** between resource creation (default: 10s, recommended: 20-30s for large scale)
 - Expected ACL count: **~173 ACLs per pod** (with 385 policies, 450 CIDRs)
 - Uses realistic policy names matching customer patterns
@@ -106,11 +169,16 @@ generated-customer-scale-pods/
 | `--deployment-count` | 100 | Number of deployments to create |
 | `--replicas` | 1 | Replicas per deployment |
 | `--total-pods` | (auto-calc) | Total pods (overrides deployment-count × replicas) |
+| `--pod-type` | deployment | Pod type: deployment or pod |
 | `--policy-count` | 485 | Number of MultiNetworkPolicies |
 | `--cidrs-per-policy` | 450 | CIDR blocks per policy |
 | `--sleep-interval` | 10 | Sleep seconds between deployments (use 20-30 for large scale) |
 | `--vlan-count` | 9 | Number of VLANs (vlan750-vlan758) |
 | `--namespace` | loadtest | Target namespace |
+| `--deployments-only` | false | Create only deployments/pods (skip NADs and policies) |
+| `--gradual` | false | Apply deployments gradually in steps |
+| `--step-size` | 10 | Deployments per step (only with --gradual) |
+| `--step-interval` | 30 | Sleep seconds between steps (only with --gradual) |
 | `--dry-run` | false | Generate files without applying |
 | `--apply` | false | Apply to cluster |
 | `--clean` | - | Clean up all resources |
@@ -125,6 +193,289 @@ generated-customer-scale-pods/
 | X-Large | 2000 | 1 | 2,000 | 385 | ~346,000 | ~11 hrs (20s) |
 
 **Note:** Time estimates include policy application time. Use `--sleep-interval 20` or higher for large deployments to avoid OVN/OVS overload.
+
+#### Full Customer-Scale Deployment: Batch vs Gradual
+
+**Deployment Target:**
+- **1000 Pods** (100 deployments × 10 replicas)
+- **385 MultiNetworkPolicies**
+- **450 CIDR rules** per policy
+- **Expected Result:** ~173,250 ACLs (173 ACLs per pod)
+
+---
+
+##### Option 1: Batch Mode (All Resources at Once)
+
+Apply all resources in one batch - faster but may overwhelm cluster.
+
+```bash
+./generate-customer-scale-pods.sh \
+  --deployment-count 100 \
+  --replicas 10 \
+  --policy-count 385 \
+  --cidrs-per-policy 450 \
+  --apply
+```
+
+**Timeline:**
+1. Generate manifests: ~2 seconds
+2. Apply 9 NADs: ~5 seconds (all at once)
+3. Apply 385 policies: ~10 seconds (all at once)
+4. Apply 100 deployments: ~10 seconds (all at once)
+5. Pods starting: ~5-15 minutes (all 1000 pods simultaneously)
+
+**Total time:** ~5-15 minutes (fast but risky)
+
+**Pros:**
+- Fastest deployment
+- Simple, single command
+
+**Cons:**
+- May overwhelm cluster control plane
+- All 1000 pods start simultaneously
+- Difficult to debug if issues occur
+- Can cause "timed out waiting for OVS port binding" errors
+- May cause ovnkube-node pod crashes
+
+**When to use:**
+- Small clusters with <100 pods
+- Testing environments only
+- When cluster has significant spare capacity
+
+---
+
+##### Option 2: Gradual Mode (Step-by-Step) - RECOMMENDED
+
+Apply deployments in controlled steps - slower but safer and more reliable.
+
+```bash
+./generate-customer-scale-pods.sh \
+  --deployment-count 100 \
+  --replicas 10 \
+  --policy-count 385 \
+  --cidrs-per-policy 450 \
+  --gradual \
+  --step-size 10 \
+  --step-interval 30 \
+  --apply
+```
+
+**Timeline:**
+1. Generate manifests: ~2 seconds
+2. Apply 9 NADs: ~5 seconds (all at once)
+3. Apply 385 policies: ~10 seconds (all at once)
+4. **Apply 100 deployments in 10 steps:**
+   - Step 1: Apply 10 deployments (100 pods) → wait 30s
+   - Step 2: Apply 10 deployments (100 pods) → wait 30s
+   - Step 3: Apply 10 deployments (100 pods) → wait 30s
+   - ... (continues for 10 steps)
+   - Step 10: Apply 10 deployments (100 pods) → done
+5. Pods starting: Gradual (100 pods every 30 seconds)
+
+**Total time:** ~5-10 minutes (controlled and predictable)
+
+**Step Output Example:**
+```
+[INFO] Step 1: Applying deployments 1-10 of 100
+[INFO]   Deployments in this step: 10
+[INFO]   Pods in this step: 100 (10 × 10)
+[INFO]   Applying: loadtest-pod-0.yaml
+[INFO]   Applying: loadtest-pod-1.yaml
+...
+[INFO]   Applying: loadtest-pod-9.yaml
+[INFO] ✓ Step 1 complete. Total pods created so far: ~100
+[INFO] Waiting 30s before next step...
+
+[INFO] Step 2: Applying deployments 11-20 of 100
+[INFO]   Deployments in this step: 10
+[INFO]   Pods in this step: 100 (10 × 10)
+...
+```
+
+**Pros:**
+- Prevents cluster control plane overload
+- Allows monitoring between steps
+- Can interrupt if issues detected
+- Better visibility into deployment progress
+- More predictable resource consumption
+- Significantly reduces OVS timeout errors
+
+**Cons:**
+- Takes slightly longer than batch mode
+- More verbose output
+
+**When to use:**
+- Production environments
+- Large deployments (500+ pods)
+- First-time large-scale testing
+- When cluster capacity is uncertain
+
+---
+
+##### Comparison Table
+
+| Aspect | Batch Mode | Gradual Mode (10/step, 30s) |
+|--------|------------|----------------------------|
+| **Command** | `--apply` | `--gradual --step-size 10 --step-interval 30 --apply` |
+| **Total Time** | ~5-15 min | ~5-10 min |
+| **NADs Applied** | All at once (9 NADs) | All at once (9 NADs) |
+| **Policies Applied** | All at once (385 policies) | All at once (385 policies) |
+| **Deployments Applied** | All at once (100 deployments) | In 10 steps (10 deployments/step) |
+| **Pods Starting** | All at once (1000 pods) | Gradually (100 pods every 30s) |
+| **Cluster Load** | High spike | Distributed evenly |
+| **Monitoring Difficulty** | Hard (everything happens fast) | Easy (step-by-step progress) |
+| **OVS Timeout Risk** | High | Low |
+| **Interruptible** | No | Yes (Ctrl+C between steps) |
+| **Recommended For** | <100 pods | 500+ pods |
+
+**See [GRADUAL_DEPLOYMENT_GUIDE.md](./GRADUAL_DEPLOYMENT_GUIDE.md) for detailed usage and examples.**
+
+---
+
+##### Step-by-Step: Creating 1000 Pods with 385 Policies
+
+**Complete Walkthrough - Gradual Mode (Recommended)**
+
+```bash
+# Step 1: Navigate to loadtest directory
+cd /path/to/loadtest
+
+# Step 2: (Optional) Check baseline ACL count
+./demo-acl-check.sh > baseline-acls.txt
+
+# Step 3: Deploy with gradual mode
+./generate-customer-scale-pods.sh \
+  --deployment-count 100 \
+  --replicas 10 \
+  --policy-count 385 \
+  --cidrs-per-policy 450 \
+  --gradual \
+  --step-size 10 \
+  --step-interval 30 \
+  --apply 2>&1 | tee deployment-$(date +%Y%m%d-%H%M%S).log
+
+# What you'll see:
+# [INFO] Customer-Scale MNP Generator
+# [INFO] ==========================================
+# [INFO] Deployments: 100
+# [INFO] Replicas per deployment: 10
+# [INFO] Total Pods: 1000 (100 × 10)
+# [INFO] VLANs: 9 (vlan750-vlan758)
+# [INFO] Policies: 385
+# [INFO] CIDRs per policy: 450
+# [INFO] Gradual deployment: 10 deployments per step, 10 total steps
+# [INFO] Step interval: 30s
+# [INFO] Expected ACLs per Pod: ~173
+# [INFO] Total expected ACLs: ~173,250
+# [INFO] ==========================================
+#
+# [INFO] Generating NetworkAttachmentDefinitions for 9 VLANs...
+# [INFO] Generating 100 deployments (with 10 replicas each = 1000 total pods)...
+# [INFO] Generating 385 MultiNetworkPolicies (CIDR-heavy pattern)...
+#
+# [INFO] Applying to cluster...
+# [INFO] Applying NetworkAttachmentDefinitions...
+# [INFO] Applying MultiNetworkPolicies...
+# [INFO] Applying deployments gradually in steps...
+#
+# [INFO] Step 1: Applying deployments 1-10 of 100
+# [INFO]   Deployments in this step: 10
+# [INFO]   Pods in this step: 100 (10 × 10)
+# ... (10 steps total, 30s wait between each)
+# [INFO] ✓ All 100 deployments applied in 10 steps
+
+# Step 4: Monitor deployment in another terminal (while step 3 runs)
+watch -n 10 'oc get deployment,pods -n loadtest | head -25'
+
+# Step 5: Wait for all pods to reach Running state (~5-10 minutes)
+oc get pods -n loadtest -w
+
+# Step 6: Verify ACL count
+./demo-acl-check.sh
+
+# Expected output:
+# Total ACLs in OVN NB: ~173,250
+# (173 ACLs per pod × 1000 pods)
+
+# Step 7: (Optional) Compare with baseline
+./demo-acl-check.sh > after-acls.txt
+diff baseline-acls.txt after-acls.txt
+
+# Step 8: Cleanup when done
+./clean-customer-scale-pods.sh
+```
+
+**Complete Walkthrough - Batch Mode**
+
+```bash
+# Step 1: Navigate to loadtest directory
+cd /path/to/loadtest
+
+# Step 2: Deploy all at once (CAUTION: may overwhelm cluster)
+./generate-customer-scale-pods.sh \
+  --deployment-count 100 \
+  --replicas 10 \
+  --policy-count 385 \
+  --cidrs-per-policy 450 \
+  --apply 2>&1 | tee deployment-$(date +%Y%m%d-%H%M%S).log
+
+# What you'll see:
+# [INFO] Customer-Scale MNP Generator
+# [INFO] ==========================================
+# [INFO] Deployments: 100
+# [INFO] Replicas per deployment: 10
+# [INFO] Total Pods: 1000 (100 × 10)
+# [INFO] Policies: 385
+# [INFO] CIDRs per policy: 450
+# [INFO] Expected ACLs per Pod: ~173
+# [INFO] Total expected ACLs: ~173,250
+# [INFO] ==========================================
+#
+# [INFO] Applying to cluster...
+# [INFO] Applying NetworkAttachmentDefinitions...
+# [INFO] Applying MultiNetworkPolicies...
+# [INFO] Applying deployments...
+# [INFO] ✓ Resources applied to cluster
+# (All 100 deployments applied at once)
+
+# Step 3: Monitor deployment (all 1000 pods start simultaneously)
+watch -n 10 'oc get deployment,pods -n loadtest | head -25'
+
+# Step 4: Check for pod errors (common in batch mode)
+oc get pods -n loadtest | grep -v Running
+
+# If you see ContainerCreating errors:
+# "timed out waiting for OVS port binding"
+# This means cluster was overwhelmed - use gradual mode instead
+
+# Step 5: Verify ACL count (once all pods are Running)
+./demo-acl-check.sh
+
+# Step 6: Cleanup
+./clean-customer-scale-pods.sh
+```
+
+---
+
+#### Deployments-Only Mode
+
+Add more pods to an existing environment without recreating NADs and policies:
+
+```bash
+# Add 500 more pods to existing network configuration
+./generate-customer-scale-pods.sh \
+  --deployment-count 50 \
+  --replicas 10 \
+  --deployments-only \
+  --gradual \
+  --step-size 5 \
+  --apply
+```
+
+**Use cases:**
+- Scaling up an existing test environment
+- Testing pod density without changing network policies
+- Incremental capacity testing
 
 ---
 
@@ -233,6 +584,31 @@ generated-vms-mnp/
 
 ## Supporting Scripts
 
+### Cleanup
+
+**clean-customer-scale-pods.sh** - Clean up pod-based deployments
+```bash
+# Clean all resources (deployments, policies, NADs)
+./clean-customer-scale-pods.sh
+
+# Clean only deployments/pods (keep policies and NADs)
+./clean-customer-scale-pods.sh --deployments-only
+
+# Dry run to preview what would be deleted
+./clean-customer-scale-pods.sh --dry-run
+
+# Clean specific namespace
+./clean-customer-scale-pods.sh --namespace my-test
+```
+
+**Options:**
+- `--deployments-only` - Delete only deployments/pods (skip policies and NADs)
+- `--skip-deployments` - Skip deleting deployments/pods
+- `--skip-policies` - Skip deleting multi-networkpolicies
+- `--skip-nads` - Skip deleting network attachment definitions
+- `--dry-run` - Show what would be deleted without deleting
+- `--namespace NS` - Specify namespace (default: loadtest)
+
 ### Monitoring & Validation
 
 **demo-acl-check.sh** - Quick ACL count check
@@ -270,10 +646,42 @@ generated-vms-mnp/
 
 ## Workflow Examples
 
-### Example 1: Full Pod-Based Customer Simulation
+### Example 1: Full Pod-Based Customer Simulation (Gradual Mode - RECOMMENDED)
 
 ```bash
-# 1. Generate and apply resources (1000 pods, 385 policies)
+# 1. Generate and apply resources (1000 pods, 385 policies) GRADUALLY
+./generate-customer-scale-pods.sh \
+  --deployment-count 100 \
+  --replicas 10 \
+  --policy-count 385 \
+  --cidrs-per-policy 450 \
+  --gradual \
+  --step-size 10 \
+  --step-interval 30 \
+  --apply 2>&1 | tee deployment.log
+
+# 2. Monitor progress (in another terminal)
+watch -n 10 'oc get deployment,pods -n loadtest | head -20'
+
+# 3. Monitor ACL count during deployment
+watch -n 30 './demo-acl-check.sh'
+
+# 4. Wait for deployment completion (~10 minutes for deployments)
+# Progress shown: Step 1/10, Step 2/10, etc.
+
+# 5. Verify final ACL count
+./demo-acl-check.sh
+# Expected: ~346,000 ACLs (346 ACLs per pod × 1000 pods)
+
+# 6. Cleanup when done
+./clean-customer-scale-pods.sh
+```
+
+### Example 1b: Full Pod-Based Customer Simulation (Batch Mode)
+
+```bash
+# 1. Generate and apply resources (1000 pods, 385 policies) ALL AT ONCE
+# WARNING: May overwhelm cluster - gradual mode recommended
 ./generate-customer-scale-pods.sh \
   --total-pods 1000 \
   --policy-count 385 \
@@ -293,26 +701,51 @@ watch -n 10 'oc get deployment,pods -n loadtest | head -20'
 # Expected: ~346,000 ACLs (346 ACLs per pod × 1000 pods)
 
 # 6. Cleanup when done
-./generate-customer-scale-pods.sh --clean
+./clean-customer-scale-pods.sh
 ```
 
-### Example 2: Progressive Load Testing (Pods)
+### Example 2: Progressive Load Testing with Gradual Scaling
 
 ```bash
-# Start small
-./generate-customer-scale-pods.sh --total-pods 100 --policy-count 5 --apply
+# Step 1: Start small (100 pods)
+./generate-customer-scale-pods.sh \
+  --deployment-count 100 \
+  --replicas 1 \
+  --policy-count 5 \
+  --apply
 ./demo-acl-check.sh
 # Wait and observe cluster
 
-# Scale to medium
-./generate-customer-scale-pods.sh --clean
-./generate-customer-scale-pods.sh --total-pods 500 --policy-count 25 --apply
+# Step 2: Add more pods to existing setup (400 more pods = 500 total)
+./generate-customer-scale-pods.sh \
+  --deployment-count 40 \
+  --replicas 10 \
+  --deployments-only \
+  --gradual \
+  --step-size 5 \
+  --apply
 ./demo-acl-check.sh
 # Wait and observe cluster
 
-# Scale to full
-./generate-customer-scale-pods.sh --clean
-./generate-customer-scale-pods.sh --total-pods 1000 --policy-count 385 --apply
+# Step 3: Scale to full (add 500 more pods = 1000 total)
+./generate-customer-scale-pods.sh \
+  --deployment-count 50 \
+  --replicas 10 \
+  --deployments-only \
+  --gradual \
+  --step-size 10 \
+  --apply
+./demo-acl-check.sh
+
+# Step 4: Add more policies to full deployment
+./clean-customer-scale-pods.sh
+./generate-customer-scale-pods.sh \
+  --deployment-count 100 \
+  --replicas 10 \
+  --policy-count 385 \
+  --gradual \
+  --step-size 10 \
+  --apply
 ./demo-acl-check.sh
 ```
 
@@ -607,14 +1040,23 @@ oc get network.operator.openshift.io cluster -o yaml
 ### Clean Specific Test
 
 ```bash
-# Pods-based test
-./generate-customer-scale-pods.sh --clean
+# Pods-based test (all resources)
+./clean-customer-scale-pods.sh
+
+# Pods-based test (deployments only, keep policies/NADs)
+./clean-customer-scale-pods.sh --deployments-only
+
+# Preview what would be deleted (dry run)
+./clean-customer-scale-pods.sh --dry-run
 
 # VM-based test (customer-scale)
 ./generate-customer-scale-vms.sh --clean
 
 # VM-based test (simplified)
 ./generate-vms-with-mnp.sh --clean
+
+# Legacy cleanup using generate script
+./generate-customer-scale-pods.sh --clean
 ```
 
 ### Manual Cleanup
@@ -635,59 +1077,126 @@ rm -rf generated-customer-scale-vms/
 rm -rf generated-vms-mnp/
 ```
 
+### Partial Cleanup During Testing
+
+```bash
+# Remove only deployments (for quick iteration on pod tests)
+./clean-customer-scale-pods.sh --deployments-only
+
+# Remove only policies (keep deployments and NADs)
+./clean-customer-scale-pods.sh --skip-deployments --skip-nads
+
+# Remove everything except NADs (reuse network configuration)
+./clean-customer-scale-pods.sh --skip-nads
+```
+
 ---
 
 ## Best Practices
 
-### 1. Start Small, Scale Gradually
+### 1. Use Gradual Mode for Large Deployments (RECOMMENDED)
+
+```bash
+# For 500+ pods, ALWAYS use gradual mode
+./generate-customer-scale-pods.sh \
+  --deployment-count 100 \
+  --replicas 10 \
+  --gradual \
+  --step-size 10 \
+  --step-interval 30 \
+  --apply
+
+# Benefits:
+# - Prevents cluster overload
+# - Better monitoring and debugging
+# - Can interrupt if issues arise
+```
+
+### 2. Start Small, Scale Gradually
 
 ```bash
 # Progressive scaling approach
 ./generate-customer-scale-pods.sh --total-pods 10 --policy-count 5 --apply
 # Observe cluster behavior, then scale up
+
+# Use deployments-only mode to add more pods incrementally
+./generate-customer-scale-pods.sh \
+  --deployment-count 50 \
+  --replicas 10 \
+  --deployments-only \
+  --gradual \
+  --apply
 ```
 
-### 2. Monitor Resource Usage
+### 3. Monitor Resource Usage
 
 ```bash
 # Before starting large test
 oc adm top nodes
 oc adm top pods -n openshift-ovn-kubernetes
 
-# During test
+# During test (in separate terminal)
 watch -n 30 'oc adm top nodes'
+
+# Monitor ACL generation during gradual deployment
+watch -n 30 './demo-acl-check.sh'
 ```
 
-### 3. Use Dry-Run First
+### 4. Use Dry-Run First
 
 ```bash
 # Validate before applying
-./generate-customer-scale-pods.sh --total-pods 1000 --policy-count 385 --dry-run
+./generate-customer-scale-pods.sh \
+  --deployment-count 100 \
+  --replicas 10 \
+  --gradual \
+  --dry-run
 
 # Review generated files
 cat generated-customer-scale-pods/SUMMARY.md
 ```
 
-### 4. Save Logs
+### 5. Save Logs
 
 ```bash
-# Capture full deployment log
-./generate-customer-scale-pods.sh --total-pods 1000 --policy-count 385 --apply \
-  2>&1 | tee deployment-$(date +%Y%m%d-%H%M%S).log
+# Capture full deployment log with timestamp
+./generate-customer-scale-pods.sh \
+  --deployment-count 100 \
+  --replicas 10 \
+  --gradual \
+  --step-size 10 \
+  --apply 2>&1 | tee deployment-$(date +%Y%m%d-%H%M%S).log
 ```
 
-### 5. Baseline Before Load Testing
+### 6. Baseline Before Load Testing
 
 ```bash
 # Capture baseline ACL count
 ./demo-acl-check.sh > baseline-acls.txt
 
 # Run test
-./generate-customer-scale-pods.sh --apply
+./generate-customer-scale-pods.sh --gradual --apply
 
 # Compare after
 ./demo-acl-check.sh > after-acls.txt
 diff baseline-acls.txt after-acls.txt
+```
+
+### 7. Use Deployments-Only for Incremental Testing
+
+```bash
+# Setup base environment once (NADs + policies)
+./generate-customer-scale-pods.sh \
+  --deployment-count 10 \
+  --policy-count 385 \
+  --apply
+
+# Add more pods without recreating policies
+./generate-customer-scale-pods.sh \
+  --deployment-count 50 \
+  --deployments-only \
+  --gradual \
+  --apply
 ```
 
 ---
@@ -737,7 +1246,11 @@ diff baseline-acls.txt after-acls.txt
 
 ## References
 
+### Documentation
+- **Gradual Deployment Guide:** See [GRADUAL_DEPLOYMENT_GUIDE.md](./GRADUAL_DEPLOYMENT_GUIDE.md) for detailed gradual deployment usage
 - **Dependencies:** See [DEPENDENCIES.md](./DEPENDENCIES.md) for detailed dependency information
+
+### External Links
 - **OpenShift Networking:** https://docs.openshift.com/container-platform/latest/networking/
 - **MultiNetworkPolicy:** https://docs.openshift.com/container-platform/latest/networking/multiple_networks/
 - **OVN-Kubernetes:** https://github.com/ovn-org/ovn-kubernetes
@@ -755,5 +1268,12 @@ For issues or questions:
 
 ---
 
-**Last Updated:** February 2026  
+**Last Updated:** March 2026
 **Tested On:** OpenShift 4.15 with OVN-Kubernetes
+
+## New Features (March 2026)
+
+- ✨ **Gradual Deployment Mode** - Apply pods in steps to prevent cluster overload
+- ✨ **Deployments-Only Mode** - Add pods without recreating NADs/policies
+- ✨ **Enhanced Cleanup Script** - Flexible cleanup with selective deletion options
+- 📚 **Comprehensive Guide** - See [GRADUAL_DEPLOYMENT_GUIDE.md](./GRADUAL_DEPLOYMENT_GUIDE.md) for detailed examples

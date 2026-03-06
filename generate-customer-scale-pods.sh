@@ -21,6 +21,9 @@ VLAN_COUNT="${VLAN_COUNT:-9}"
 POLICY_COUNT="${POLICY_COUNT:-485}"
 SLEEP_INTERVAL="${SLEEP_INTERVAL:-10}"          # Sleep seconds between deployments
 OUTPUT_DIR="$(dirname "$0")/generated-customer-scale-pods"
+GRADUAL="${GRADUAL:-false}"                     # Gradual deployment mode
+STEP_SIZE="${STEP_SIZE:-10}"                    # Deployments per step in gradual mode
+STEP_INTERVAL="${STEP_INTERVAL:-30}"            # Sleep seconds between steps in gradual mode
 
 # Policy configuration - matching customer pattern
 PORTS_PER_POLICY="${PORTS_PER_POLICY:-2}"      # Customer avg: ~1.75
@@ -157,6 +160,9 @@ OPTIONS:
     --namespace NS          Namespace (default: loadtest)
     --output-dir DIR        Output directory (default: ./generated-customer-scale-pods)
     --deployments-only      Create only deployments/pods (skip NADs and policies)
+    --gradual               Apply deployments gradually in steps
+    --step-size N           Number of deployments per step (default: 10, only with --gradual)
+    --step-interval N       Sleep seconds between steps (default: 30, only with --gradual)
     --dry-run               Generate files without applying
     --apply                 Apply to cluster
     --clean                 Clean up resources
@@ -168,6 +174,12 @@ EXAMPLES:
 
     # Create only deployments/pods (no NADs or policies)
     $0 --deployment-count 50 --deployments-only --apply
+
+    # Gradually create 1000 pods: 100 deployments, 10 replicas each, 10 at a time
+    $0 --deployment-count 100 --replicas 10 --gradual --step-size 10 --step-interval 30 --apply
+
+    # Gradually create 500 pods: 50 deployments, 10 replicas each, 5 at a time
+    $0 --deployment-count 50 --replicas 10 --gradual --step-size 5 --step-interval 20 --apply
 
     # 50 deployments with 2 replicas each (100 pods total)
     $0 --deployment-count 50 --replicas 2 --apply
@@ -245,6 +257,18 @@ while [[ $# -gt 0 ]]; do
         --deployments-only)
             DEPLOYMENTS_ONLY=true
             shift
+            ;;
+        --gradual)
+            GRADUAL=true
+            shift
+            ;;
+        --step-size)
+            STEP_SIZE="$2"
+            shift 2
+            ;;
+        --step-interval)
+            STEP_INTERVAL="$2"
+            shift 2
             ;;
         --dry-run)
             DRY_RUN=true
@@ -359,7 +383,13 @@ else
     log_info "CIDRs per policy: $CIDRS_PER_POLICY"
     log_info "Ports per policy: $PORTS_PER_POLICY"
 fi
-log_info "Sleep interval: ${SLEEP_INTERVAL}s"
+if [[ "$GRADUAL" == "true" ]]; then
+    TOTAL_STEPS=$(( (DEPLOYMENT_COUNT + STEP_SIZE - 1) / STEP_SIZE ))
+    log_info "Gradual deployment: $STEP_SIZE deployments per step, $TOTAL_STEPS total steps"
+    log_info "Step interval: ${STEP_INTERVAL}s"
+else
+    log_info "Sleep interval: ${SLEEP_INTERVAL}s"
+fi
 log_info "Namespace: $NAMESPACE"
 log_info "Output: $OUTPUT_DIR"
 log_info "=========================================="
@@ -764,8 +794,59 @@ if [[ "$APPLY" == "true" ]]; then
     fi
 
     # Apply Pods/Deployments
-    log_info "Applying ${POD_TYPE}s..."
-    oc apply -f "$OUTPUT_DIR/pods/"
+    if [[ "$GRADUAL" == "true" ]]; then
+        log_info "Applying ${POD_TYPE}s gradually in steps..."
+
+        # Get sorted list of pod/deployment files
+        POD_FILES=($(ls -1 "$OUTPUT_DIR/pods"/*.yaml | sort))
+        TOTAL_FILES=${#POD_FILES[@]}
+        CURRENT_FILE=0
+        STEP_NUM=0
+
+        while [[ $CURRENT_FILE -lt $TOTAL_FILES ]]; do
+            STEP_NUM=$((STEP_NUM + 1))
+            STEP_START=$CURRENT_FILE
+            STEP_END=$((CURRENT_FILE + STEP_SIZE))
+
+            if [[ $STEP_END -gt $TOTAL_FILES ]]; then
+                STEP_END=$TOTAL_FILES
+            fi
+
+            STEP_COUNT=$((STEP_END - STEP_START))
+            PODS_IN_STEP=$((STEP_COUNT * REPLICAS_PER_DEPLOYMENT))
+
+            log_info ""
+            log_info "=========================================="
+            log_info "Step $STEP_NUM: Applying ${POD_TYPE}s $((STEP_START + 1))-${STEP_END} of ${TOTAL_FILES}"
+            log_info "  Deployments in this step: $STEP_COUNT"
+            log_info "  Pods in this step: $PODS_IN_STEP (${STEP_COUNT} × ${REPLICAS_PER_DEPLOYMENT})"
+            log_info "=========================================="
+
+            # Apply this batch
+            for ((i=$STEP_START; i<$STEP_END; i++)); do
+                POD_FILE="${POD_FILES[$i]}"
+                log_info "  Applying: $(basename "$POD_FILE")"
+                oc apply -f "$POD_FILE"
+            done
+
+            CURRENT_FILE=$STEP_END
+
+            # Sleep between steps (except after the last step)
+            if [[ $CURRENT_FILE -lt $TOTAL_FILES ]]; then
+                TOTAL_PODS_APPLIED=$((CURRENT_FILE * REPLICAS_PER_DEPLOYMENT))
+                log_info ""
+                log_info "✓ Step $STEP_NUM complete. Total pods created so far: ~$TOTAL_PODS_APPLIED"
+                log_info "Waiting ${STEP_INTERVAL}s before next step..."
+                sleep "$STEP_INTERVAL"
+            fi
+        done
+
+        log_info ""
+        log_info "✓ All $TOTAL_FILES ${POD_TYPE}s applied in $STEP_NUM steps"
+    else
+        log_info "Applying ${POD_TYPE}s..."
+        oc apply -f "$OUTPUT_DIR/pods/"
+    fi
 
     log_info "✓ Resources applied to cluster"
     log_info ""
